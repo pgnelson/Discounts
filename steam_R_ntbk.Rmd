@@ -1,0 +1,109 @@
+---
+title: "Steam Sales Notebook"
+output: html_notebook
+---
+```{r}
+#import packages, data
+library(lme4)
+library(ggplot2)
+steam_dat <- read.csv("~/Documents/steam_dat.txt")
+#Some ownership numbers vary wildly due to discrete events, like changes in measurement methodoly, so I want to remove changes >10%.
+steam_dat$date<-as.Date(steam_dat$date, format = "%Y-%m-%d")
+
+#steam_sub<-subset(steam_dat, date > as.Date('2016-01-01') & date < as.Date('2018-01-01'))
+
+#Even though all decreases in ownership are artifactual, I want to keep them beacuse it's part of the natural noise in the data.
+```
+```{r}
+steam_sub<-steam_dat
+steam_sub$percent_ch_sales <- steam_sub$ch_sales / steam_sub$mean_owners
+steam_sub <- subset(steam_sub, abs(percent_ch_sales) < 0.1 & is.na(percent_ch_sales) == FALSE & days_on_market > 0)
+steam_sub$days_on_market_trans <- steam_sub$days_on_market / max(steam_sub$days_on_market)
+steam_no_disc<-subset(steam_sub, discount_duration==0)
+#glmer does best with factors of similar scale, so I transform time to be from 0 to 1
+steam_sub$days_on_market_trans<-steam_sub$days_on_market / max(steam_sub$days_on_market)
+```
+
+
+```{r}
+#A log transform the lowest AIC score
+no_discount_glm_lin<-(lmer(percent_ch_sales~(days_on_market_trans)*(1|game_name)+(1|date), data = steam_no_disc))
+no_discount_glm_log<-(lmer(percent_ch_sales~log(days_on_market_trans)*(1|game_name)+(1|date), data = steam_no_disc))
+no_discount_glm_sqrt<-(lmer(percent_ch_sales~sqrt(days_on_market_trans)*(1|game_name)+(1|date), data = steam_no_disc))
+summary(no_discount_glm_lin)
+summary(no_discount_glm_log)
+
+AIC(no_discount_glm_lin)
+AIC(no_discount_glm_log)
+AIC(no_discount_glm_sqrt)
+```
+
+
+```{r}
+#Next we need to know if higher discounts are better for sales, so I'll divide discounts into 4 bins:
+steam_sub$discount_bin<-ifelse(steam_sub$discount ==0,"ano discount",
+                        ifelse(steam_sub$discount <=1/3,"low discount",
+                        ifelse(steam_sub$discount <=2/3,"med discount","high discount")))
+discount_bin_glm<-(lmer(percent_ch_sales~discount_bin+log(days_on_market_trans)+(1|game_name), data = steam_sub))
+summary(discount_bin_glm)
+#it looks like discounts increase sales, but the magnitude of the bin doesn't matter so much
+```
+```{r}
+#I'll test this by another categorical term, discount or no discount
+steam_sub$discount_binary<-ifelse(steam_sub$discount ==0,"ano discount","discount")
+#discount_binary_glm<-(lmer(percent_ch_sales~discount_binary+discount+log(days_on_market_trans)*game_name+(1|date), data = steam_sub))
+discount_binary_nest_glm<-(lmer(percent_ch_sales~discount*(days_on_market_trans)*(1|game_name), data = steam_sub))
+#summary(discount_binary_glm)
+summary(discount_binary_nest_glm)
+
+#Here it looks like higher discounts actually decrease sales, although the effect is extremely small and probably not real, I can compare the models with and without the quantitative discount term to see if it actually makes a difference 
+#anova(discount_binary_glm,discount_binary_nest_glm )
+#it looks like it does, since the idea that higher discounts mean fewer sales is somewhat proposterous, I'd wager that there is confounding with time that the model isn't sorting out, i.e. smaller sales happen before bigger sales and therefore smaller sales appear to boost sales more.
+```
+`
+
+
+```{r}
+#Get the difference in precidicted revenue with and without sales.
+steam_sub$original_price_trans<-steam_sub$original_price/max(steam_sub$original_price)
+discount_glm<-(lmer(percent_ch_sales~discount*log(days_on_market_trans)*(1|game_name)+(1|date), data = steam_sub))#
+
+discount_sim = 0.1
+steam_sub_no_disc<-steam_sub
+steam_sub_no_disc$discount<-0
+steam_sub_no_disc$discount_binary<-ifelse(steam_sub_no_disc$discount ==0,"ano discount","discount")
+steam_sub_no_disc$price<-steam_sub_no_disc$original_price
+
+steam_sub_all_disc<-steam_sub
+steam_sub_all_disc$discount<-discount_sim
+steam_sub_all_disc$discount_binary<-ifelse(steam_sub_all_disc$discount ==0,"ano discount","discount")
+steam_sub_all_disc$price<-steam_sub$price * (1-discount_sim)
+
+steam_sub$pred_w_disc<-predict(discount_glm, newdata = steam_sub_all_disc, re.form=~0)
+steam_sub$pred_no_disc<-predict(discount_glm, newdata = steam_sub_no_disc, re.form=~0)
+
+steam_sub$rev_w_discounts<-steam_sub$pred_w_disc * steam_sub$original_price*(1-discount_sim) #* steam_sub$owners
+steam_sub$rev_no_discounts<-steam_sub$pred_no_disc * steam_sub$original_price#* steam_sub$owner
+#plot(w_discounts~no_discounts, data = revenue)
+days_list = seq(0, 100, by=1)
+pred_rev <- data.frame(matrix(unlist(days_list), nrow=length(days_list), byrow=T))
+colnames(pred_rev)<-c("days_after_release")
+namevector <- c("no_discounts", "discounts")
+pred_rev[ , namevector] <- NA
+for (day in seq(1, 100, by=1)){
+  steam_sub_sub<-subset(steam_sub, days_on_market==day)
+  pred_rev$days_after_release[day]<-day
+  pred_rev$no_discounts[day]<-sum(steam_sub_sub$rev_no_discounts)
+  pred_rev$discounts[day]<-sum(steam_sub_sub$rev_w_discounts)
+  #diff_in_rev <-sum(steam_sub_sub$rev_w_discounts)-sum(steam_sub_sub$rev_no_discounts)
+  #print(c(day, sum(steam_sub_sub$rev_w_discounts),sum(steam_sub_sub$rev_no_discounts), diff_in_rev))
+  #pred_rev[pred_rev$days_after_release==day]$no_discounts<-sum(steam_sub_sub$rev_no_discounts)
+}
+#head(steam_sub$rev_w_discounts)
+```
+
+```{r}
+ggplot(data = pred_rev)+geom_line(aes(x = days_after_release, y = (no_discounts), colour = "No discount"))+geom_line(aes(x = days_after_release, y = (discounts), colour ="10% Discount"))+xlab("Days after release")+ylab("Daily revenue per current owner") + theme_bw()+theme(legend.position=c(.9,.75),legend.title = element_blank())
+```
+
+
